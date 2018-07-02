@@ -34,22 +34,52 @@ A modified version of latest DyNet is already included (e.g., dynet folder). Ple
 
 Compiling to execute on a CPU is as follows
 
-mkdir build_cpu
-cd build_cpu
-cmake .. -DEIGEN3_INCLUDE_DIR=eigen [-DBoost_NO_BOOST_CMAKE=ON]
-make -j 2
+    mkdir build_cpu
+    cd build_cpu
+    cmake .. -DEIGEN3_INCLUDE_DIR=eigen [-DBoost_NO_BOOST_CMAKE=ON]
+    make -j 2
 
 Boost note. The "-DBoost_NO_BOOST_CMAKE=ON" can be optional but if you have a trouble of boost-related build error(s), adding it will help to overcome. 
 
 MKL support. If you have Intel's MKL library installed on your machine, you can speed up the computation on the CPU by:
 
-cmake .. -DEIGEN3_INCLUDE_DIR=EIGEN [-DBoost_NO_BOOST_CMAKE=ON] -DMKL=TRUE -DMKL_ROOT=MKL
+    cmake .. -DEIGEN3_INCLUDE_DIR=EIGEN [-DBoost_NO_BOOST_CMAKE=ON] -DMKL=TRUE -DMKL_ROOT=MKL
 
 substituting in different paths to EIGEN and MKL if you have placed them in different directories. 
 
-This will build the 3 binaries
+This will build the 2 binaries
     
-build_cpu/src/docmt-memnn
-build_cpu/src/sentrnnlm
+    build_cpu/src/docmt-memnn
+    build_cpu/src/sentrnnlm
 
+# GPU build
 
+Building on the GPU uses the Nvidia CUDA library, currently tested against version 8.0.61.
+The process is as follows
+
+    mkdir build_gpu
+    cd build_gpu
+    cmake .. -DBACKEND=cuda -DEIGEN3_INCLUDE_DIR=EIGEN -DCUDA_TOOLKIT_ROOT_DIR=CUDA [-DBoost_NO_BOOST_CMAKE=ON]
+    make -j 2
+
+substituting in your Eigen and CUDA folders, as appropriate.
+
+This will result in the 2 binaries
+
+    build_gpu/src/attentional
+    build_gpu/src/biattentional
+
+# Using the model
+
+See readme_commands.txt
+
+# References
+
+We should like to mention that the sentence-based NMT model is a modification (removing structural bias) of the attentional NMT system implemented by Trevor Cohn (https://github.com/trevorcohn/mantis). 
+
+# Contacts
+
+Please contact me if you have any issues in using the code.
+
+---
+Updated July 2018
