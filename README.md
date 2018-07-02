@@ -66,8 +66,8 @@ substituting in your Eigen and CUDA folders, as appropriate.
 
 This will result in the 2 binaries
 
-    build_gpu/src/attentional
-    build_gpu/src/biattentional
+    build_gpu/src/docmt-memnn
+    build_gpu/src/sentrnnlm
 
 # Using the model
 
