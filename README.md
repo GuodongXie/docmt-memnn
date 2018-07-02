@@ -29,3 +29,27 @@ As mentioned above, you'll need the latest [development] version of eigen
 hg clone https://bitbucket.org/eigen/eigen/ -r 346ecdb
 
 A modified version of latest DyNet is already included (e.g., dynet folder). Please note that this is an older version and if the code is run with a new version some modifications may need to be made.
+
+# CPU build
+
+Compiling to execute on a CPU is as follows
+
+mkdir build_cpu
+cd build_cpu
+cmake .. -DEIGEN3_INCLUDE_DIR=eigen [-DBoost_NO_BOOST_CMAKE=ON]
+make -j 2
+
+Boost note. The "-DBoost_NO_BOOST_CMAKE=ON" can be optional but if you have a trouble of boost-related build error(s), adding it will help to overcome. 
+
+MKL support. If you have Intel's MKL library installed on your machine, you can speed up the computation on the CPU by:
+
+cmake .. -DEIGEN3_INCLUDE_DIR=EIGEN [-DBoost_NO_BOOST_CMAKE=ON] -DMKL=TRUE -DMKL_ROOT=MKL
+
+substituting in different paths to EIGEN and MKL if you have placed them in different directories. 
+
+This will build the 3 binaries
+    
+build_cpu/src/docmt-memnn
+build_cpu/src/sentrnnlm
+
+
