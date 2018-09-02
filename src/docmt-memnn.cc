@@ -102,24 +102,24 @@ template <class DMT_t> vector<vector<vector<dynet::real>>> ComputeDocTrg_SrcRep(
 template <class DMT_t> vector<vector<vector<dynet::real>>> ComputeDocTrueTrg_SrcRep(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &sent_repi, DocCorpus &training_doc);
 
 template <class DMT_t> void Test_Rescore(Model &model, DMT_t &dmt, Corpus &testing);
-template <class DMT_t> void Test_Decode(Model &model, DMT_t &dmt, std::string test_file);
+template <class DMT_t> void Test_Decode(Model &model, DMT_t &dmt, std::string test_file, bool use_joint_vocab);
 
 template <class DMT_t> void TestDocSrc_Rescore(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &Tsent_repi, DocCorpus &testing_doc);
-template <class DMT_t> void TestDocSrc_Decode(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &Tsent_repi, string test_file);
+template <class DMT_t> void TestDocSrc_Decode(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &Tsent_repi, string test_file, bool use_joint_vocab);
 template <class DMT_t> void TestDocTrg_Rescore(Model &model, DMT_t &dmt, DocCorpus &testing_doc);
-template <class DMT_t> void TestDocTrg_Decode(Model &model, DMT_t &dmt, string test_file, bool iter_decode);
+template <class DMT_t> void TestDocTrg_Decode(Model &model, DMT_t &dmt, string test_file, bool iter_decode, bool use_joint_vocab);
 template <class DMT_t> void TestDocSrcTrg_Rescore(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &Tsent_repi, DocCorpus &testing_doc);
-template <class DMT_t> void TestDocSrcTrg_Decode(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &Tsent_repi, string test_file, bool iter_decode);
+template <class DMT_t> void TestDocSrcTrg_Decode(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &Tsent_repi, string test_file, bool iter_decode, bool use_joint_vocab);
 
 const Sentence* GetContext(const Corpus &corpus, unsigned i);
 
 //for sentence-level corpus
-Corpus Read_Corpus(const string &filename);
+Corpus Read_Corpus(const string &filename, bool use_joint_vocab);
 SourceDoc Read_TestCorpus(const string &filename);
 //for document-level corpus
-Corpus Read_DocCorpus(const string &filename);
+Corpus Read_DocCorpus(const string &filename, bool use_joint_vocab);
 DocCorpus Read_DocCorpus(Corpus &corpus);
-SourceCorpus Read_TestDocCorpus(const string &filename);
+SourceCorpus Read_TestDocCorpus(const string &filename, bool use_joint_vocab);
 SourceDocCorpus Read_TestDocCorpus(SourceCorpus &scorpus);
 void Read_Numbered_Sentence(const std::string& line, std::vector<int>* s, Dict* sd, std::vector<int> &ids);
 void Read_Numbered_Sentence_Pair(const std::string& line, std::vector<int>* s, Dict* sd, std::vector<int>* t, Dict* td, std::vector<int> &ids);
@@ -144,6 +144,9 @@ int main(int argc, char** argv) {
         ("test_doc", value<string>(), "file containing testing sentences for document-level corpus.")
         ("slen_limit", value<unsigned>()->default_value(0), "limit the sentence length (either source or target); no by default")
         //-----------------------------------------
+        ("use_joint_vocab", "whether or not to use a joint vocabulary for source and target (w/BPE)")
+        ("shared_embeddings", "whether or not to share the embeddings (if true then use joint vocabulary)")
+        //-----------------------------------------
 		("rescore", "rescore (source, target) sentence/document pairs in testing, default: translate source only")
 		("iterative_decode", "use iterative decoding when using target memory component")
 		//("beam,b", value<unsigned>()->default_value(0), "size of beam in decoding; 0=greedy")
@@ -153,7 +156,8 @@ int main(int argc, char** argv) {
         //-----------------------------------------
 		("sgd_trainer", value<unsigned>()->default_value(0), "use specific SGD trainer (0: vanilla SGD; 1: momentum SGD; 2: Adagrad; 3: AdaDelta; 4: Adam)")
 		("sparse_updates", value<bool>()->default_value(true), "enable/disable sparse update(s) for lookup parameter(s); true by default")
-		//-----------------------------------------
+        ("grad-clip-threshold", value<float>()->default_value(5.f), "use specific gradient clipping threshold (https://arxiv.org/pdf/1211.5063.pdf); 5 by default")
+        //-----------------------------------------
 		("doc_src_mem", "perform doc-level MT algorithm with source document context")
         ("doc_trg_mem", "perform doc-level MT algorithm with target document context")
         ("local_mem", "consider only local context of source/target sentences during training instead of MemNN: default not")
@@ -260,6 +264,9 @@ int main_body(variables_map vm)
     DOCMINIBATCH_SIZE = vm["docminibatch_size"].as<unsigned>();
 
 	bool bidir = vm.count("bidirectional");
+    bool use_joint_vocab = vm.count("use_joint_vocab") || vm.count("shared_embeddings");
+    bool shared_embeddings = vm.count("shared_embeddings");
+
     bool bi_srnn = vm.count("bi_srnn");
     bool src_mem = vm.count("doc_src_mem");
     bool trg_mem = vm.count("doc_trg_mem");
@@ -278,7 +285,7 @@ int main_body(variables_map vm)
     Corpus training, devel, testing, training_sent, devel_sent, testing_sent;
     DocCorpus training_doc, devel_doc, testing_doc;
     cerr << "Reading sentence training data from " << vm["train_sent"].as<string>() << "...\n";
-    training_sent = Read_Corpus(vm["train_sent"].as<string>());//contains sentence-level bigger corpus
+    training_sent = Read_Corpus(vm["train_sent"].as<string>(), use_joint_vocab);//contains sentence-level bigger corpus
     kSRC_UNK = sd.convert("<unk>");// add <unk> if does not exist!
     kTGT_UNK = td.convert("<unk>");
     sd.freeze(); // no new word types allowed
@@ -290,30 +297,30 @@ int main_body(variables_map vm)
     if (!src_mem && !trg_mem) {
         if (vm.count("devel_sent")) {
             cerr << "Reading sentence dev data from " << vm["devel_sent"].as<string>() << "...\n";
-            devel_sent = Read_Corpus(vm["devel_sent"].as<string>());
+            devel_sent = Read_Corpus(vm["devel_sent"].as<string>(), use_joint_vocab);
         }
 
         if (vm.count("test_sent") && vm.count("rescore")) {
             // otherwise "test" file is assumed just to contain source language strings
             cerr << "Reading sentence test examples from " << vm["test_sent"].as<string>() << endl;
-            testing_sent = Read_Corpus(vm["test_sent"].as<string>());
+            testing_sent = Read_Corpus(vm["test_sent"].as<string>(), use_joint_vocab);
         }
     }
     else {
         cerr << "Reading document training data from " << vm["train_doc"].as<string>() << "...\n";
-        training = Read_DocCorpus(vm["train_doc"].as<string>());//contains sentence-level parallel corpus
+        training = Read_DocCorpus(vm["train_doc"].as<string>(), use_joint_vocab);//contains sentence-level parallel corpus
         training_doc = Read_DocCorpus(training);//contains document-level parallel corpus
 
         if (vm.count("devel_doc")) {
             cerr << "Reading document dev data from " << vm["devel_doc"].as<string>() << "...\n";
-            devel = Read_DocCorpus(vm["devel_doc"].as<string>());
+            devel = Read_DocCorpus(vm["devel_doc"].as<string>(), use_joint_vocab);
             devel_doc = Read_DocCorpus(devel);
         }
 
         if (vm.count("test_doc") && vm.count("rescore")) {
             // otherwise "test" file is assumed just to contain source language strings
             cerr << "Reading document test examples from " << vm["test_doc"].as<string>() << endl;
-            testing = Read_DocCorpus(vm["test_doc"].as<string>());
+            testing = Read_DocCorpus(vm["test_doc"].as<string>(), use_joint_vocab);
             testing_doc = Read_DocCorpus(testing);
         }
     }
@@ -357,6 +364,7 @@ int main_body(variables_map vm)
 		sgd = new SimpleSGDTrainer(model, vm["lr_eta"].as<float>());
 	else
 	   assert("Unknown SGD trainer type! (0: vanilla SGD; 1: momentum SGD; 2: Adagrad; 3: AdaDelta; 4: Adam)");
+    sgd->clip_threshold = vm["grad-clip-threshold"].as<float>();
 	sgd->eta_decay = vm["lr_eta_decay"].as<float>();
 	sgd->sparse_updates_enabled = vm["sparse_updates"].as<bool>();
 	if (!sgd->sparse_updates_enabled)
@@ -364,7 +372,7 @@ int main_body(variables_map vm)
 
 	cerr << "%% Using " << flavour << " recurrent units" << endl;
 	DocMTMemNNModel<rnn_t> dmt(&model, SRC_VOCAB_SIZE, TGT_VOCAB_SIZE
-		, SLAYERS, TLAYERS, HIDDEN_DIM, ALIGN_DIM
+		, SLAYERS, TLAYERS, HIDDEN_DIM, ALIGN_DIM, shared_embeddings
 		, bidir, bi_srnn, src_mem, trg_mem, loco_mem, mem_to_ctx, mem_to_op);
 
 	dmt.Set_Dropout(vm["dropout_enc"].as<float>(), vm["dropout_dec"].as<float>());
@@ -419,7 +427,7 @@ int main_body(variables_map vm)
         if (vm.count("rescore"))//e.g., compute perplexity scores
             Test_Rescore(model, dmt, testing_sent);
         else { // test/decode
-            Test_Decode(model, dmt, vm["test_sent"].as<string>());
+            Test_Decode(model, dmt, vm["test_sent"].as<string>(), use_joint_vocab);
         }
         cerr << "Sentence-level decoding completed!" << endl;
     }
@@ -439,7 +447,7 @@ int main_body(variables_map vm)
             if (vm.count("rescore"))//e.g., compute perplexity scores
                 TestDocSrc_Rescore(model, dmt, Tsent_repi, testing_doc);
             else { // test/decode
-                TestDocSrc_Decode(model, dmt, Tsent_repi, vm["test_doc"].as<string>());
+                TestDocSrc_Decode(model, dmt, Tsent_repi, vm["test_doc"].as<string>(), use_joint_vocab);
             }
             cerr << "Document-level decoding using source memory completed!" << endl;
         }
@@ -448,7 +456,7 @@ int main_body(variables_map vm)
             if (vm.count("rescore"))//e.g., compute perplexity scores
                 TestDocTrg_Rescore(model, dmt, testing_doc);
             else { // test/decode
-                TestDocTrg_Decode(model, dmt, vm["test_doc"].as<string>(), iter_decode);
+                TestDocTrg_Decode(model, dmt, vm["test_doc"].as<string>(), iter_decode, use_joint_vocab);
             }
             cerr << "Document-level decoding using target memory completed!" << endl;
         }
@@ -457,7 +465,7 @@ int main_body(variables_map vm)
             if (vm.count("rescore"))//e.g., compute perplexity scores
                 TestDocSrcTrg_Rescore(model, dmt, Tsent_repi, testing_doc);
             else { // test/decode
-                TestDocSrcTrg_Decode(model, dmt, Tsent_repi, vm["test_doc"].as<string>(), iter_decode);
+                TestDocSrcTrg_Decode(model, dmt, Tsent_repi, vm["test_doc"].as<string>(), iter_decode, use_joint_vocab);
             }
             cerr << "Document-level decoding using source and target memory completed!" << endl;
         }
@@ -509,7 +517,7 @@ void Test_Rescore(Model &model, DMT_t &dmt, Corpus &testing)
 }
 
 template <class DMT_t>
-void Test_Decode(Model &model, DMT_t &dmt, string test_file)
+void Test_Decode(Model &model, DMT_t &dmt, string test_file, bool use_joint_vocab)
 {
     cerr << "Reading sentence-level test examples from " << test_file << endl;
     SourceDoc testing = Read_TestCorpus(test_file);
@@ -582,14 +590,13 @@ void TestDocSrc_Rescore(Model &model, DMT_t &dmt, vector<vector<vector<dynet::re
 }
 
 template <class DMT_t>
-void TestDocSrc_Decode(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &Tsent_repi, string test_file)
+void TestDocSrc_Decode(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &Tsent_repi, string test_file, bool use_joint_vocab)
 {
     cerr << "Reading test examples from " << test_file << endl;
-    SourceCorpus testing = Read_TestDocCorpus(test_file);
+    SourceCorpus testing = Read_TestDocCorpus(test_file, use_joint_vocab);
     SourceDocCorpus testing_doc = Read_TestDocCorpus(testing);
 
     vector<Sentence> vssent;
-
     //get translations based on document-level model
     for (unsigned i = 0; i < testing_doc.size(); ++i) {
         cout << "<d>" << endl;
@@ -672,17 +679,17 @@ void TestDocTrg_Rescore(Model &model, DMT_t &dmt, DocCorpus &testing_doc)
 }
 
 template <class DMT_t>
-void TestDocTrg_Decode(Model &model, DMT_t &dmt, string test_file, bool iter_decode)
+void TestDocTrg_Decode(Model &model, DMT_t &dmt, string test_file, bool iter_decode, bool use_joint_vocab)
 {
 	cerr << "Reading test examples from " << test_file << endl;
-	SourceCorpus testing = Read_TestDocCorpus(test_file);
+	SourceCorpus testing = Read_TestDocCorpus(test_file, use_joint_vocab);
 	SourceDocCorpus testing_doc = Read_TestDocCorpus(testing);
 
 	vector<Sentence> vssent;
 	vector<vector<Sentence>> target_doc;
 	vector<vector<vector<dynet::real>>> test_trgsent_rep;
 
-	cout << "Iteration 1" << endl;
+    cout << "Iteration 1" << endl;
 	//get representations for the targets
 	for (unsigned i = 0; i < testing_doc.size(); ++i) {
 		vector<vector<dynet::real>> trgdoc_rep;
@@ -849,17 +856,17 @@ void TestDocSrcTrg_Rescore(Model &model, DMT_t &dmt, vector<vector<vector<dynet:
 }
 
 template <class DMT_t>
-void TestDocSrcTrg_Decode(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &Tsent_repi, string test_file, bool iter_decode)
+void TestDocSrcTrg_Decode(Model &model, DMT_t &dmt, vector<vector<vector<dynet::real>>> &Tsent_repi, string test_file, bool iter_decode, bool use_joint_vocab)
 {
 	cerr << "Reading test examples from " << test_file << endl;
-	SourceCorpus testing = Read_TestDocCorpus(test_file);
+	SourceCorpus testing = Read_TestDocCorpus(test_file, use_joint_vocab);
 	SourceDocCorpus testing_doc = Read_TestDocCorpus(testing);
 
 	vector<Sentence> vssent;
 	vector<vector<Sentence>> target_doc;
 	vector<vector<vector<dynet::real>>> test_trgsent_rep;
 
-	cout << "Iteration 1" << endl;
+    cout << "Iteration 1" << endl;
 	//get representations for the targets
 	for (unsigned i = 0; i < testing_doc.size(); ++i) {
 		vector<vector<dynet::real>> trgdoc_rep;
@@ -2399,7 +2406,7 @@ void TrainDocMTSrcTrgModel_Batch(Model &model, DMT_t &dmt, vector<vector<vector<
 }
 
 // --------------------------------------------------------------------------------------------------------------------------------
-Corpus Read_Corpus(const string &filename)
+Corpus Read_Corpus(const string &filename, bool use_joint_vocab)
 {
     ifstream in(filename);
     assert(in);
@@ -2409,7 +2416,10 @@ Corpus Read_Corpus(const string &filename)
     vector<int> identifiers({ -1 });
     while (getline(in, line)) {
         Sentence source, target;
-        read_sentence_pair(line, source, sd, target, td);
+        if (!use_joint_vocab)
+            read_sentence_pair(line, source, sd, target, td);
+        else
+            read_sentence_pair(line, source, sd, target, sd);
 
         corpus.push_back(SentencePairID(source, target, identifiers[0]));
 
@@ -2425,7 +2435,13 @@ Corpus Read_Corpus(const string &filename)
         ++lc;
     }
 
-    cerr << lc << " lines, " << stoks << " & " << ttoks << " tokens (s & t), " << sd.size() << " & " << td.size() << " types\n";
+    if (use_joint_vocab)	td = sd;
+
+    if (!use_joint_vocab)
+        cerr << lc << " lines, " << stoks << " & " << ttoks << " tokens (s & t), " << sd.size() << " & " << td.size() << " types\n";
+    else
+        cerr << lc << " lines, " << stoks << " & " << ttoks << " tokens (s & t), " << sd.size() << " joint s & t types\n";
+
     return corpus;
 }
 
@@ -2460,7 +2476,7 @@ SourceDoc Read_TestCorpus(const string &filename)
 }
 
 //function to read the corpus with docid's. Output is a bilingual parallel corpus with docid
-Corpus Read_DocCorpus(const string &filename)
+Corpus Read_DocCorpus(const string &filename, bool use_joint_vocab)
 {
 	ifstream in(filename);
 	assert(in);
@@ -2471,7 +2487,11 @@ Corpus Read_DocCorpus(const string &filename)
 	while (getline(in, line)) {
 		++lc;
 		Sentence source, target;
-		Read_Numbered_Sentence_Pair(line, &source, &sd, &target, &td, identifiers);
+        if (!use_joint_vocab)
+            Read_Numbered_Sentence_Pair(line, &source, &sd, &target, &td, identifiers);
+        else
+            Read_Numbered_Sentence_Pair(line, &source, &sd, &target, &sd, identifiers);
+
         corpus.push_back(SentencePairID(source, target, identifiers[0]));
 
 		stoks += source.size();
@@ -2484,8 +2504,12 @@ Corpus Read_DocCorpus(const string &filename)
 		}
 	}
 
-	cerr << lc << " lines, " << stoks << " & " << ttoks << " tokens (s & t), " << sd.size() << " & " << td.size() << " types\n";
-	return corpus;
+    if (!use_joint_vocab)
+        cerr << lc << " lines, " << stoks << " & " << ttoks << " tokens (s & t), " << sd.size() << " & " << td.size() << " types\n";
+    else
+        cerr << lc << " lines, " << stoks << " & " << ttoks << " tokens (s & t), " << sd.size() << " joint s & t types\n";
+
+    return corpus;
 }
 
 //function to convert the bilingual parallel corpus with docid to document-level corpus
@@ -2517,7 +2541,7 @@ DocCorpus Read_DocCorpus(Corpus &corpus)
 }
 
 //function to read the source corpus with docid's. Output is a monolingual corpus with docid
-SourceCorpus Read_TestDocCorpus(const string &filename)
+SourceCorpus Read_TestDocCorpus(const string &filename, bool use_joint_vocab)
 {
     ifstream in(filename);
     assert(in);
@@ -2539,7 +2563,11 @@ SourceCorpus Read_TestDocCorpus(const string &filename)
         }
     }
 
-    cerr << lc << " lines, " << stoks << " tokens (s), " << sd.size() << " types\n";
+    if (!use_joint_vocab)
+        cerr << lc << " lines, " << stoks << " tokens (s), " << sd.size() << " & " << td.size() << " types\n";
+    else
+        cerr << lc << " lines, " << stoks << " tokens (s), " << sd.size() << " joint s & t types\n";
+
     return scorpus;
 }
 

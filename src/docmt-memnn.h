@@ -48,7 +48,7 @@ struct DocMTMemNNModel {
 	explicit DocMTMemNNModel(dynet::Model* model,
 		unsigned _src_vocab_size, unsigned _tgt_vocab_size,
         unsigned slayers, unsigned tlayers,
-        unsigned hidden_dim, unsigned align_dim,
+        unsigned hidden_dim, unsigned align_dim, bool _shared_embeddings,
         bool _rnn_src_embeddings, bool _rnn_sent_embeddings,
         bool _doc_src_mem, bool _doc_trg_mem, bool _local_mem,
         bool _mem_to_ctx, bool _mem_to_op,
@@ -116,6 +116,7 @@ struct DocMTMemNNModel {
 
     bool rnn_src_embeddings;
     bool rnn_sent_embeddings;
+	bool shared_embeddings;
 
 	bool src_mem;
     bool trg_mem;
@@ -168,7 +169,10 @@ struct DocMTMemNNModel {
 	Expression i_va;
 	Expression i_Wa;
 	Expression i_Ua;
-    Expression i_Ws;//parameter for source memory transformation
+	Expression seq_mask_key;
+	Expression seq_mask_query;
+
+	Expression i_Ws;//parameter for source memory transformation
     Expression i_Wt;//parameter for target memory transformation
     Expression i_Ust;
     Expression i_bias_t;
@@ -200,13 +204,14 @@ template <class Builder>
 DocMTMemNNModel<Builder>::DocMTMemNNModel(dynet::Model* model,
 	unsigned _src_vocab_size, unsigned _tgt_vocab_size
 	, unsigned slayers, unsigned tlayers
-	, unsigned hidden_dim, unsigned align_dim
+	, unsigned hidden_dim, unsigned align_dim, bool _shared_embeddings
 	, bool _rnn_src_embeddings, bool _rnn_sent_embeddings
 	, bool _doc_src_mem, bool _doc_trg_mem, bool _local_mem
     , bool _mem_to_ctx, bool _mem_to_op
 	, LookupParameter* _p_cs, LookupParameter* _p_ct)
 : builder_src_fwd(slayers, hidden_dim, hidden_dim, *model),
   builder_src_bwd(slayers, hidden_dim, hidden_dim, *model),
+  shared_embeddings(_shared_embeddings),
   rnn_src_embeddings(_rnn_src_embeddings),
   rnn_sent_embeddings(_rnn_sent_embeddings),
   src_mem(_doc_src_mem),
@@ -224,8 +229,12 @@ DocMTMemNNModel<Builder>::DocMTMemNNModel(dynet::Model* model,
         builder = Builder(tlayers, (_rnn_src_embeddings) ? 3 * hidden_dim : 2 * hidden_dim, hidden_dim, *model);
 
 	p_cs = (_p_cs==nullptr)?model->add_lookup_parameters(src_vocab_size, {hidden_dim}):*_p_cs;
-	p_ct = (_p_ct==nullptr)?model->add_lookup_parameters(tgt_vocab_size, {hidden_dim}):*_p_ct;
-    p_R = model->add_parameters({tgt_vocab_size, hidden_dim});
+	if (shared_embeddings)
+		p_ct = p_cs;
+	else
+		p_ct = (_p_ct==nullptr)?model->add_lookup_parameters(tgt_vocab_size, {hidden_dim}):*_p_ct;
+
+	p_R = model->add_parameters({tgt_vocab_size, hidden_dim});
 	p_P = model->add_parameters({hidden_dim, hidden_dim});
 	p_bias = model->add_parameters({tgt_vocab_size});
 	p_Wa = model->add_parameters({align_dim, tlayers*hidden_dim});
@@ -498,15 +507,20 @@ void DocMTMemNNModel<Builder>::StartNewInstance_Batch(const std::vector<std::vec
 	slen = max_len;
 	std::vector<unsigned> words(sources.size());
 	std::vector<Expression> source_embeddings, zero_batch, zerotrg_batch;
+	std::vector<std::vector<float>> v_seq_masks(sources.size());
+
 	//cerr << "(1a) embeddings" << endl;
 	if (!rnn_src_embeddings) {
 		for (unsigned l = 0; l < max_len; l++){
 			for (unsigned bs = 0; bs < sources.size(); ++bs){
 				words[bs] = (l < sources[bs].size()) ? (unsigned)sources[bs][l] : kSRC_EOS;
-				if (l < sources[bs].size()){ 
-					tstats.words_src++; 
+				if (l < sources[bs].size()){
+					tstats.words_src++;
 					if (sources[bs][l] == kSRC_UNK) tstats.words_src_unk++;
+					v_seq_masks[bs].push_back(0.f);
 				}
+				else
+					v_seq_masks[bs].push_back(1.f);
 			}
 			source_embeddings.push_back(lookup(cg, p_cs, words));
 		}
@@ -524,10 +538,14 @@ void DocMTMemNNModel<Builder>::StartNewInstance_Batch(const std::vector<std::vec
 		for (unsigned l = 0; l < max_len; l++){
 			for (unsigned bs = 0; bs < sources.size(); ++bs){
 				words[bs] = (l < sources[bs].size()) ? (unsigned)sources[bs][l] : kSRC_EOS;
-				if (l < sources[bs].size()){ 
-					tstats.words_src++; 
+				if (l < sources[bs].size()){
+					tstats.words_src++;
 					if (sources[bs][l] == kSRC_UNK) tstats.words_src_unk++;
+					v_seq_masks[bs].push_back(0.f);
 				}
+				else
+					v_seq_masks[bs].push_back(1.f);
+
 			}
 			src_fwd[l] = builder_src_fwd.add_input(lookup(cg, p_cs, words));
 		}
@@ -552,8 +570,8 @@ void DocMTMemNNModel<Builder>::StartNewInstance_Batch(const std::vector<std::vec
 	}
     if (!trg_mem && mem_to_ctx)    i_ztrg = zeroes(cg, { h_dim });
 
-	/*
     //compute zero vector in batch mode for memory context representation
+	/*
     if (mem_to_ctx){
         if (!src_mem){
             for (unsigned l = 0; l < max_len; ++l) {
@@ -574,7 +592,7 @@ void DocMTMemNNModel<Builder>::StartNewInstance_Batch(const std::vector<std::vec
             i_ztrg_rep = concatenate_cols(zerotrg_batch);
         }
     }
-	*/
+    */
 
 	src = concatenate_cols(source_embeddings);
 	// now for the target sentence
@@ -597,6 +615,15 @@ void DocMTMemNNModel<Builder>::StartNewInstance_Batch(const std::vector<std::vec
             i_bias_t = parameter(cg, p_bias_t);
         }
     }
+
+	//create the mask expressions for padded positions
+	std::vector<Expression> v_i_seq_masks;
+	for (unsigned i = 0; i < v_seq_masks.size(); i++){
+		Expression i_mask = dynet::input(cg, {max_len, 1}, v_seq_masks[i]);//a column vector
+		v_i_seq_masks.push_back(operator*(i_mask, -999999.f));
+	}
+	seq_mask_key = concatenate_to_batch(v_i_seq_masks);
+	seq_mask_query = 1.f - operator/(seq_mask_key, -999999.f);
 
 	// initialise h from global information of the source sentence
 	//cerr << "(1e) init builder" << endl;
@@ -691,10 +718,13 @@ Expression DocMTMemNNModel<Builder>::AddInput_Batch(const std::vector<unsigned>&
 	else
 		i_e_t = transpose(tanh(i_uax)) * i_va;
 
-	Expression i_alpha_t = softmax(i_e_t); // FIXME: consider summing to less than one?
-	Expression i_c_t = src * i_alpha_t; // FIXME: effectively summing here, consider maxing?
+	//Expression i_alpha_t = softmax(i_e_t); // FIXME: consider summing to less than one?
+	//Expression i_c_t = src * i_alpha_t; // FIXME: effectively summing here, consider maxing?
 
-    // target word inputs
+	Expression i_alpha_t = softmax(i_e_t + seq_mask_key); // FIXME: consider summing to less than one?
+	Expression i_c_t = src * cmult(i_alpha_t, seq_mask_query); // mask the padded positions in the source, FIXME: effectively summing here, consider maxing?
+
+	// target word inputs
 	Expression i_x_t = lookup(cg, p_ct, trg_words);
     Expression input;
     if (mem_to_ctx)
@@ -1073,10 +1103,13 @@ Expression DocMTMemNNModel<Builder>::AddDocInput_Batch(const std::vector<unsigne
     else
         i_e_t = transpose(tanh(i_uax)) * i_va;
 
-    Expression i_alpha_t = softmax(i_e_t); // FIXME: consider summing to less than one?
-    Expression i_c_t = src * i_alpha_t; // FIXME: effectively summing here, consider maxing?
+	//Expression i_alpha_t = softmax(i_e_t); // FIXME: consider summing to less than one?
+	//Expression i_c_t = src * i_alpha_t; // FIXME: effectively summing here, consider maxing?
 
-    // target word inputs
+	Expression i_alpha_t = softmax(i_e_t + seq_mask_key); // FIXME: consider summing to less than one?
+	Expression i_c_t = src * cmult(i_alpha_t, seq_mask_query); // mask the padded positions in the source, FIXME: effectively summing here, consider maxing?
+
+	// target word inputs
     Expression i_x_t = lookup(cg, p_ct, trg_words);
     Expression input;
     if (mem_to_ctx)
