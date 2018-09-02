@@ -75,7 +75,7 @@ See readme_commands.txt
 
 # References
 
-We should like to mention that the sentence-based NMT model is a modification (removing structural bias) of the attentional NMT system implemented by Trevor Cohn (https://github.com/trevorcohn/mantis). 
+We would like to mention that the sentence-based NMT model is a modification (removing structural bias) of the attentional NMT system implemented by Trevor Cohn (https://github.com/trevorcohn/mantis). 
 
 # Contacts
 
