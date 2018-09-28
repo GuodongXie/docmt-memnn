@@ -22,7 +22,7 @@ Before compiling dynet, you need:
 
 First, clone the repository
 
-git clone https://github.com/smar111/docmt-memnn.git
+git clone https://github.com/sameenmaruf/docmt-memnn.git
 
 As mentioned above, you'll need the latest [development] version of eigen
 
